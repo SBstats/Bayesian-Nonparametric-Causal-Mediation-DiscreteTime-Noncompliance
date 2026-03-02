@@ -1,0 +1,17 @@
+#!/bin/bash
+#SBATCH --job-name=EDPNoncomplianceProjEDPMSim                          # Job name
+#SBATCH --ntasks=1
+#SBATCH --mem=64GB
+#SBATCH --mail-type=ALL                                 # Mail events (NONE, BEGIN, END, FAIL, ALL)
+#SBATCH --mail-user=XXXX                  # Where to send mail
+#SBATCH --time=25:00:00                                 # Time limit hrs:min:sec
+#SBATCH --array=1-500
+#SBATCH --account=XXXX			
+#SBATCH --qos=XXXX	
+date; hostname; pwd
+
+mkdir -p EDPM_simu_results
+
+module load R
+
+Rscript 	Simulation-TrueDGPEDPMFitRun500.R
