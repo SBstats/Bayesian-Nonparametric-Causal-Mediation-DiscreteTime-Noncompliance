@@ -1,0 +1,1847 @@
+# True Parametric Models
+
+
+```{r, warning=FALSE,message=FALSE,echo=FALSE}
+set.seed(1234)
+
+```
+
+
+```{r, warning=FALSE,message=FALSE,echo=FALSE}
+# Load packages (install manually before running if not present)
+# To install: install.packages(c("data.table", "ggplot2", "truncnorm", "mvtnorm", "nimble"))
+library(data.table)
+library(ggplot2)
+library(truncnorm)
+library(mvtnorm)
+library(nimble, warn.conflicts = FALSE)
+
+# Enable Nimble options for saving intermediates and verbose output
+nimbleOptions(saveIntermediates = TRUE)  # Saves generated C++ code files
+nimbleOptions(verbose = TRUE)           # Provides detailed compilation output
+
+
+digCom_data <- read.csv("non-comp_dataset.csv")
+digCom_df = data.frame(digCom_data)
+head(digCom_df)
+##################Load subset data#################################
+#digCom_df = get(load("subset_non-comp_dataset_n5000.Rdata"))
+
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+M1_t_mode = Mode(digCom_df$daysSinceOpened)
+
+cat("The mode of M1_t is:", M1_t_mode, ".\n")
+
+M2_t_mode = Mode(digCom_df$daysSincePurchased)
+
+cat("The mode of M2_t is:", M2_t_mode, ".\n")
+
+
+Y_t_mode = Mode(digCom_df$Order_cnt)
+
+cat("The mode of Y_t is:", Y_t_mode, ".\n")
+
+
+# scale the mediators
+
+
+digCom_workdf = data.frame(ID = digCom_df$recipient_id,
+                           Recent = digCom_df$Recent, 
+                           GENDER = digCom_df$gender,
+                           BASELINE_AGE = digCom_df$age, 
+                           t = digCom_df$t,
+                           Z_t = digCom_df$Discount,
+                           D_t = digCom_df$opened, 
+                           M1_t = digCom_df$daysSinceOpened,
+                           M2_t = digCom_df$daysSincePurchased,
+                           Y_t = digCom_df$Order_cnt)
+
+
+# change GENDER elements from M to 1,and others to 0.
+digCom_workdf$GENDER <- ifelse(digCom_workdf$GENDER == "M", 1, 0)
+
+
+# change BASELINE_AGE elements from >=4 to 1,and <4 to 0.
+digCom_workdf$BASELINE_AGE <- ifelse(digCom_workdf$BASELINE_AGE >= 4, 1, 0)
+
+
+#-------------------------------------------------------------------------------------------------------------
+#------------------------------------------Data in wide format------------------------------------------------
+#-------------------------------------------------------------------------------------------------------------
+setDT(digCom_workdf)
+
+digCom_workdf_wide <- dcast(
+  digCom_workdf,
+  ID + GENDER + BASELINE_AGE ~ t,
+  value.var = c("Z_t", "D_t", "M1_t", "M2_t", "Y_t"),
+  fun.aggregate = mean   # or unique, depending on your data
+)
+head(digCom_workdf_wide)
+
+digCom_workdf_wide = digCom_workdf_wide[!duplicated(ID)]  #remove any duplicated ID rows in the wide format data
+
+digCom_workdf_wide = na.omit(digCom_workdf_wide) #deleting the some rows when converting data from long to wide
+
+
+cat("The total sample size for the analysis is:", length(unique(digCom_workdf_wide$ID)), "\n")
+
+
+#-------------------------------------------------------------------------------------------------------------
+#------------------------------------------Input data---------------------------------------------------------
+#-------------------------------------------------------------------------------------------------------------
+
+
+#L0 df order columns by intercept, binary covariates, continuous covariates
+L0_intercept = rep(1,length(digCom_workdf_wide$ID))
+L0_df_wide = data.frame(Intercept = L0_intercept,
+                        GENDER = digCom_workdf_wide$GENDER, BASELINE_AGE = digCom_workdf_wide$BASELINE_AGE) 
+
+
+Y_vec_wide = digCom_workdf_wide$Y_t_3
+
+
+```
+
+
+### Define design matrices for parametric regression
+
+
+```{r}
+param_reg_mat = data.frame(GENDER = digCom_workdf_wide$GENDER, BASELINE_AGE = digCom_workdf_wide$BASELINE_AGE,
+                                    Z_t_1 = digCom_workdf_wide$Z_t_1, D_t_1 = digCom_workdf_wide$D_t_1, M1_t_1 = digCom_workdf_wide$M1_t_1, M2_t_1 = digCom_workdf_wide$M2_t_1,
+                                    Z_t_2 = digCom_workdf_wide$Z_t_2, D_t_2 = digCom_workdf_wide$D_t_2, M1_t_2 = digCom_workdf_wide$M1_t_2, M2_t_2 = digCom_workdf_wide$M2_t_2,
+                                    Z_t_3 = digCom_workdf_wide$Z_t_3, D_t_3 = digCom_workdf_wide$D_t_3, M1_t_3 = digCom_workdf_wide$M1_t_3, M2_t_3 = digCom_workdf_wide$M2_t_3,
+                                    Y_t_3 = digCom_workdf_wide$Y_t_3)
+
+
+Y_param_reg_design_mat = data.frame(GENDER = digCom_workdf_wide$GENDER, BASELINE_AGE = digCom_workdf_wide$BASELINE_AGE,
+                           Z_t_3 = digCom_workdf_wide$Z_t_3, 
+                           D_t_3 = digCom_workdf_wide$D_t_3,
+                           M1_t_3 = digCom_workdf_wide$M1_t_3, 
+                           M2_t_3 = digCom_workdf_wide$M2_t_3)
+
+
+M2t3_param_reg_design_mat = data.frame(GENDER = digCom_workdf_wide$GENDER, BASELINE_AGE = digCom_workdf_wide$BASELINE_AGE,
+                                       M2_t_2 = digCom_workdf_wide$M2_t_2,
+                                       Z_t_3 = digCom_workdf_wide$Z_t_3,
+                                       D_t_3 = digCom_workdf_wide$D_t_3,
+                                       M1_t_3 = digCom_workdf_wide$M1_t_3)
+
+
+M1t3_param_reg_design_mat = data.frame(GENDER = digCom_workdf_wide$GENDER, BASELINE_AGE = digCom_workdf_wide$BASELINE_AGE,
+                                       M1_t_2 = digCom_workdf_wide$M1_t_2,
+                                       M2_t_2 = digCom_workdf_wide$M2_t_2,
+                                       Z_t_3 = digCom_workdf_wide$Z_t_3,
+                                       D_t_3 = digCom_workdf_wide$D_t_3)
+
+Dt3_param_reg_design_mat = data.frame(GENDER = digCom_workdf_wide$GENDER, BASELINE_AGE = digCom_workdf_wide$BASELINE_AGE,
+                                      D_t_2 = digCom_workdf_wide$D_t_2,
+                                      M1_t_2 = digCom_workdf_wide$M1_t_2,
+                                      M2_t_2 = digCom_workdf_wide$M2_t_2,
+                                      Z_t_3 = digCom_workdf_wide$Z_t_3)
+
+
+Zt3_param_reg_design_mat = data.frame(GENDER = digCom_workdf_wide$GENDER, BASELINE_AGE = digCom_workdf_wide$BASELINE_AGE,
+                                      Z_t_2 = digCom_workdf_wide$Z_t_2,
+                                      D_t_2 = digCom_workdf_wide$D_t_2,
+                                      M1_t_2 = digCom_workdf_wide$M1_t_2,
+                                      M2_t_2 = digCom_workdf_wide$M2_t_2)
+
+
+M2t2_param_reg_design_mat = data.frame(GENDER = digCom_workdf_wide$GENDER, BASELINE_AGE = digCom_workdf_wide$BASELINE_AGE,
+                                        M2_t_1 = digCom_workdf_wide$M2_t_1,
+                                       Z_t_2 = digCom_workdf_wide$Z_t_2, 
+                                       D_t_2 = digCom_workdf_wide$D_t_2,
+                                       M1_t_2 = digCom_workdf_wide$M1_t_2)
+
+
+M1t2_param_reg_design_mat = data.frame(GENDER = digCom_workdf_wide$GENDER, BASELINE_AGE = digCom_workdf_wide$BASELINE_AGE,
+                                        M1_t_1 = digCom_workdf_wide$M1_t_1,
+                                        M2_t_1 = digCom_workdf_wide$M2_t_1,
+                                        Z_t_2 = digCom_workdf_wide$Z_t_2,
+                                        D_t_2 = digCom_workdf_wide$D_t_2)
+
+
+Dt2_param_reg_design_mat = data.frame(GENDER = digCom_workdf_wide$GENDER, BASELINE_AGE = digCom_workdf_wide$BASELINE_AGE,
+                                       D_t_1 = digCom_workdf_wide$D_t_1,
+                                      M1_t_1 = digCom_workdf_wide$M1_t_1, 
+                                      M2_t_1 = digCom_workdf_wide$M2_t_1,
+                                      Z_t_2 = digCom_workdf_wide$Z_t_2)
+
+
+Zt2_param_reg_design_mat = data.frame(GENDER = digCom_workdf_wide$GENDER, BASELINE_AGE = digCom_workdf_wide$BASELINE_AGE,
+                                      Z_t_1 = digCom_workdf_wide$Z_t_1, 
+                                      D_t_1 = digCom_workdf_wide$D_t_1,
+                                      M1_t_1 = digCom_workdf_wide$M1_t_1,
+                                      M2_t_1 = digCom_workdf_wide$M2_t_1)
+
+
+M2t1_param_reg_design_mat = data.frame(GENDER = digCom_workdf_wide$GENDER, BASELINE_AGE = digCom_workdf_wide$BASELINE_AGE,
+                                       Z_t_1 = digCom_workdf_wide$Z_t_1,
+                                       D_t_1 = digCom_workdf_wide$D_t_1, 
+                                       M1_t_1 = digCom_workdf_wide$M1_t_1)
+
+
+M1t1_param_reg_design_mat = data.frame(GENDER = digCom_workdf_wide$GENDER, BASELINE_AGE = digCom_workdf_wide$BASELINE_AGE,
+                                       Z_t_1 = digCom_workdf_wide$Z_t_1,
+                                       D_t_1 = digCom_workdf_wide$D_t_1)
+
+
+Dt1_param_reg_design_mat = data.frame(GENDER = digCom_workdf_wide$GENDER, BASELINE_AGE = digCom_workdf_wide$BASELINE_AGE,
+                                      Z_t_1 = digCom_workdf_wide$Z_t_1)
+
+
+Zt1_param_reg_design_mat = data.frame(GENDER = digCom_workdf_wide$GENDER, BASELINE_AGE = digCom_workdf_wide$BASELINE_AGE)
+
+
+longitudinal_data_wide_M2 = data.frame(M2_t_1 = digCom_workdf_wide$M2_t_1,
+                                       M2_t_2 = digCom_workdf_wide$M2_t_2,
+                                       M2_t_3 = digCom_workdf_wide$M2_t_3)
+
+
+longitudinal_data_wide_M1 = data.frame(M1_t_1 = digCom_workdf_wide$M1_t_1, 
+                                       M1_t_2 = digCom_workdf_wide$M1_t_2,
+                                       M1_t_3 = digCom_workdf_wide$M1_t_3)
+
+
+longitudinal_data_wide_D = data.frame(D_t_1 = digCom_workdf_wide$D_t_1,
+                                      D_t_2 = digCom_workdf_wide$D_t_2,
+                                      D_t_3 = digCom_workdf_wide$D_t_3)
+
+
+longitudinal_data_wide_Z = data.frame(Z_t_1 = digCom_workdf_wide$Z_t_1,
+                                      Z_t_2 = digCom_workdf_wide$Z_t_2,
+                                      Z_t_3 = digCom_workdf_wide$Z_t_3)
+
+
+#-------------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
+num_Bin_L0 = 2  # both gender and baseline age are binary
+
+# sample frequency of each Binary column of L0_df_wide
+pr_theta_Bin_L0 = as.numeric(colMeans(L0_df_wide[2:3], na.rm = TRUE))
+
+
+```
+
+
+## Ground truth (parameters) using parametric models
+
+### Nimble model
+
+```{r}
+
+
+#Record model sum-posterior-log-density
+
+sumLogPostDens <- nimbleFunction(
+  name = 'sumLogPostDens',
+  contains = sampler_BASE,
+  setup = function(model, mvSaved, target, control) {
+    stochNodes <- setdiff(model$getNodeNames(stochOnly = TRUE), target)
+  },
+  run = function() {
+    model[[target]] <<- model$getLogProb(stochNodes)
+  },
+  methods = list( reset = function() {} )
+)
+
+
+# Define a custom distribution for zero-inflated hurdle normal
+dzinhurdlenorm <- nimbleFunction(
+  run = function(x = double(0), pi = double(0), mu = double(0), sigma = double(0), log = integer(0, default = 0)) {
+    returnType(double(0))
+    if (sigma <= 0) stop("Sigma must be positive")
+    logProb = 0
+    if (x == 0) {
+      logProb = log(max(1e-10, pi))  # Avoid underflow for pi
+    } else {
+      # Handle truncation probability
+      truncProb = max(1e-10, 1 - pnorm(0, mean = mu, sd = sigma))
+      logProb = log(max(1e-10, 1 - pi)) +
+        dnorm(x, mean = mu, sd = sigma, log = TRUE) -
+        log(truncProb)
+    }
+    if (log) return(logProb)
+    return(exp(logProb))
+  }
+)
+
+
+rzinhurdlenorm <- nimbleFunction(
+  run = function(n = integer(0), pi = double(0), mu = double(0), sigma = double(0)) {
+    returnType(double(0))
+    if (n != 1) stop("rzinhurdlenorm only allows n = 1")
+    if (runif(1) < pi) {
+      return(0)  # Zero-inflated part
+    } else {
+      x <- -1  # Initialize x to an invalid value for the truncation
+      while (x <= 0) {
+        x <- rnorm(1, mean = mu, sd = sigma)  # Normal component
+      }
+      return(x)  # Return the valid sample
+    }
+  }
+)
+
+# Test dzinhurdlenorm
+dzinhurdlenorm(0, pi = 0.3, mu = 2, sigma = 1, log = TRUE)
+
+# Test rzinhurdlenorm
+rzinhurdlenorm(1, pi = 0.3, mu = 2, sigma = 1)
+
+
+# Register the Distribution in Nimble
+registerDistributions(list(
+  dzinhurdlenorm = list(
+    BUGSdist = "dzinhurdlenorm(pi, mu, sigma)",
+    types = c('value = double(0)', 'pi = double(0)', 'mu = double(0)', 'sigma = double(0)'),
+    discrete = FALSE  # Set to TRUE only if the distribution produces integers
+  )
+))
+
+
+#######################################################################################
+##########################Nimble Code Function##################################################
+#######################################################################################
+
+code_DG <- nimbleCode({
+  logDens ~ dnorm(0, 1)    ## this distribution does not matter: only need to compute model sum-posterior-log-density
+  
+  ##################################################################################
+  ##############################Prior distributions#################################
+  ##################################################################################
+    
+    
+  ##############################Hurdle probabilities################################
+    pi0_Y ~ dbeta(1,1)
+    pi0_M1_t3~ dbeta(1,1)
+    pi0_M2_t3~ dbeta(1,1)
+    pi0_M1_t2~ dbeta(1,1)
+    pi0_M2_t2~ dbeta(1,1)
+    pi0_M1_t1~ dbeta(1,1)
+    pi0_M2_t1~ dbeta(1,1)
+    
+    
+    #####################Regression fixed effects coefficients################################
+    # AT t =3
+    for(k in 1:num_Y_reg_coeff){beta_Yi[k]~ dnorm(mean = 0, sd = 10)}  
+    for(k in 1:num_M2t3_reg_coeff){theta_M2_t3[k]~ dnorm(mean = 0, sd = 10)} 
+    for(k in 1:num_M1t3_reg_coeff){theta_M1_t3[k]~ dnorm(mean = 0, sd = 10)} 
+    for(k in 1:num_Dt3_reg_coeff){theta_D_t3[k]~ dnorm(mean = 0, sd = 10)} 
+    for(k in 1:num_Zt3_reg_coeff){theta_Z_t3[k]~ dnorm(mean = 0, sd = 10)} 
+    
+    # AT t =2
+    for(k in 1:num_M2t2_reg_coeff){theta_M2_t2[k]~ dnorm(mean = 0, sd = 10)} 
+    for(k in 1:num_M1t2_reg_coeff){theta_M1_t2[k]~ dnorm(mean = 0, sd = 10)} 
+    for(k in 1:num_Dt2_reg_coeff){theta_D_t2[k]~ dnorm(mean = 0, sd = 10)} 
+    for(k in 1:num_Zt2_reg_coeff){theta_Z_t2[k]~ dnorm(mean = 0, sd = 10)} 
+    
+    # AT t =1
+    for(k in 1:num_M2t1_reg_coeff){theta_M2_t1[k]~ dnorm(mean = 0, sd = 10)} 
+    for(k in 1:num_M1t1_reg_coeff){theta_M1_t1[k]~ dnorm(mean = 0, sd = 10)} 
+    for(k in 1:num_Dt1_reg_coeff){theta_D_t1[k]~ dnorm(mean = 0, sd = 10)} 
+    for(k in 1:num_Zt1_reg_coeff){theta_Z_t1[k]~ dnorm(mean = 0, sd = 10)} 
+    
+    
+    #####################Regression variance coefficients################################
+    sigma_sq_Yi ~ dinvgamma(shape = 1, scale = 1)
+    sigma_sq_M2_t3 ~ dinvgamma(shape = 1, scale = 1)
+    sigma_sq_M1_t3 ~ dinvgamma(shape = 1, scale = 1)
+    sigma_sq_M2_t2 ~ dinvgamma(shape = 1, scale = 1)
+    sigma_sq_M1_t2 ~ dinvgamma(shape = 1, scale = 1)
+    sigma_sq_M2_t1 ~ dinvgamma(shape = 1, scale = 1)
+    sigma_sq_M1_t1 ~ dinvgamma(shape = 1, scale = 1)  
+      
+      
+    ##################################################################################
+    ##############################Likelihood##########################################
+    ##################################################################################
+  
+    
+    for(i in 1:n) {
+    
+    
+    #AT t = 1  
+       
+      Zt1[i] ~ dbern(pnorm(inprod(theta_Z_t1[1:num_Zt1_reg_coeff], Zt1_param_reg_design_mat[i,1:num_Zt1_reg_coeff]),0,1))
+      Dt1[i] ~ dbern(pnorm(inprod(theta_D_t1[1:num_Dt1_reg_coeff], Dt1_param_reg_design_mat[i,1:num_Dt1_reg_coeff]),0,1))  
+      
+      Z_latent_M1t1[i] ~ dbern(1 - pi0_M1_t1)  # Indicator for positive values 
+      m1t1_mean[i] <-   inprod(theta_M1_t1[1:num_M1t1_reg_coeff], 
+                               M1t1_param_reg_design_mat[i, 1:num_M1t1_reg_coeff]) 
+      data_wide_M1t1_pos[i] ~ dnorm(m1t1_mean[i], sd = sqrt(sigma_sq_M1_t1))
+      M1t1[i] ~ dnorm(Z_latent_M1t1[i]*data_wide_M1t1_pos[i], sd = 0.25) 
+      
+      Z_latent_M2t1[i] ~ dbern(1 - pi0_M2_t1)  # Indicator for positive values 
+      m2t1_mean[i] <-   inprod(theta_M2_t1[1:num_M2t1_reg_coeff], 
+                               M2t1_param_reg_design_mat[i, 1:num_M2t1_reg_coeff]) 
+      data_wide_M2t1_pos[i] ~ dnorm(m2t1_mean[i], sd = sqrt(sigma_sq_M2_t1))
+      M2t1[i] ~ dnorm(Z_latent_M2t1[i]*data_wide_M2t1_pos[i], sd = 0.25) 
+      
+    
+    #AT t = 2    
+      
+      Zt2[i] ~ dbern(pnorm(inprod(theta_Z_t2[1:num_Zt2_reg_coeff], Zt2_param_reg_design_mat[i,1:num_Zt2_reg_coeff]),0,1)) 
+      Dt2[i] ~ dbern(pnorm(inprod(theta_D_t2[1:num_Dt2_reg_coeff], Dt2_param_reg_design_mat[i,1:num_Dt2_reg_coeff]),0,1))    
+       
+      Z_latent_M1t2[i] ~ dbern(1 - pi0_M1_t2)  # Indicator for positive values 
+      m1t2_mean[i] <-   inprod(theta_M1_t2[1:num_M1t2_reg_coeff], 
+                               M1t2_param_reg_design_mat[i, 1:num_M1t2_reg_coeff]) 
+      data_wide_M1t2_pos[i] ~ dnorm(m1t2_mean[i], sd = sqrt(sigma_sq_M1_t2))
+      M1t2[i] ~ dnorm(Z_latent_M1t2[i]*data_wide_M1t2_pos[i], sd = 0.25) 
+      
+      Z_latent_M2t2[i] ~ dbern(1 - pi0_M2_t2)  # Indicator for positive values 
+      m2t2_mean[i] <-   inprod(theta_M2_t2[1:num_M2t2_reg_coeff], 
+                               M2t2_param_reg_design_mat[i, 1:num_M2t2_reg_coeff]) 
+      data_wide_M2t2_pos[i] ~ dnorm(m2t2_mean[i], sd = sqrt(sigma_sq_M2_t2))
+      M2t2[i] ~ dnorm(Z_latent_M2t2[i]*data_wide_M2t2_pos[i], sd = 0.25) 
+      
+      
+    #AT t = 3 
+      
+      Zt3[i] ~ dbern(pnorm(inprod(theta_Z_t3[1:num_Zt3_reg_coeff], Zt3_param_reg_design_mat[i,1:num_Zt3_reg_coeff]),0,1)) 
+      Dt3[i] ~ dbern(pnorm(inprod(theta_D_t3[1:num_Dt3_reg_coeff], Dt3_param_reg_design_mat[i,1:num_Dt3_reg_coeff]),0,1))  
+      
+      Z_latent_M1t3[i] ~ dbern(1 - pi0_M1_t3)  # Indicator for positive values 
+      m1t3_mean[i] <-   inprod(theta_M1_t3[1:num_M1t3_reg_coeff], 
+                               M1t3_param_reg_design_mat[i, 1:num_M1t3_reg_coeff]) 
+      data_wide_M1t3_pos[i] ~ dnorm(m1t3_mean[i], sd = sqrt(sigma_sq_M1_t3))
+      M1t3[i] ~ dnorm(Z_latent_M1t3[i]*data_wide_M1t3_pos[i], sd = 0.25) 
+      
+      Z_latent_M2t3[i] ~ dbern(1 - pi0_M2_t3)  # Indicator for positive values 
+      m2t3_mean[i] <-   inprod(theta_M2_t3[1:num_M2t3_reg_coeff], 
+                               M2t3_param_reg_design_mat[i, 1:num_M2t3_reg_coeff]) 
+      data_wide_M2t3_pos[i] ~ dnorm(m2t3_mean[i], sd = sqrt(sigma_sq_M2_t3))
+      M2t3[i] ~ dnorm(Z_latent_M2t3[i]*data_wide_M2t3_pos[i], sd = 0.25) 
+         
+      Z_latent_Y[i] ~ dbern(1 - pi0_Y)  # Indicator for positive values
+      y_mean[i] <- inprod(beta_Yi[1:num_Y_reg_coeff], Y_param_reg_design_mat[i, 1:num_Y_reg_coeff]) 
+      Y_pos[i] ~ dnorm(y_mean[i], sd =  sqrt(sigma_sq_Yi))
+      Y[i] ~ dnorm(Z_latent_Y[i]*Y_pos[i], sd = 0.25)
+    
+    
+  }
+})
+
+
+#######################################################################################
+######################################################################################
+#######################################################################################
+
+
+#######################################################################################
+##############Fit Parametric model and save one iter only for data generation##########
+#######################################################################################
+
+# one outer cluster and one inner cluster for fitting parametric data
+L0_mat = as.matrix(L0_df_wide)
+num_L0 =3   # one intercept and 2 L0
+
+number_of_mediators = 2
+zero_vec = rep(0,2)
+
+
+constants_DG <- list(n = length(unique(digCom_workdf_wide$ID)), # Number of individuals
+                  num_Y_reg_coeff = ncol(Y_param_reg_design_mat) + 1, # plus 1 to include the intercept
+                  num_M2t3_reg_coeff = ncol(M2t3_param_reg_design_mat) + 1, 
+                  num_M1t3_reg_coeff = ncol(M1t3_param_reg_design_mat) + 1, 
+                  num_Dt3_reg_coeff = ncol(Dt3_param_reg_design_mat) + 1, 
+                  num_Zt3_reg_coeff = ncol(Zt3_param_reg_design_mat) + 1, 
+                  num_M2t2_reg_coeff = ncol(M2t2_param_reg_design_mat) + 1,
+                  num_M1t2_reg_coeff = ncol(M1t2_param_reg_design_mat) + 1,
+                  num_Dt2_reg_coeff =ncol(Dt2_param_reg_design_mat) + 1, 
+                  num_Zt2_reg_coeff =ncol(Zt2_param_reg_design_mat) + 1, 
+                  num_M2t1_reg_coeff =ncol(M2t1_param_reg_design_mat) + 1, 
+                  num_M1t1_reg_coeff =ncol(M1t1_param_reg_design_mat) + 1, 
+                  num_Dt1_reg_coeff =ncol(Dt1_param_reg_design_mat) + 1, 
+                  num_Zt1_reg_coeff =ncol(Zt1_param_reg_design_mat) + 1
+)
+
+
+data_DG <- list(
+             # regression outcomes
+             #### t=3
+             Y = digCom_workdf_wide$Y_t_3,
+             Z_latent_Y = ifelse(digCom_workdf_wide$Y_t_3 ==0, 0,1),
+             M2t3 =  digCom_workdf_wide$M2_t_3,
+             M1t3 = digCom_workdf_wide$M1_t_3,
+             Z_latent_M2t3 = ifelse(digCom_workdf_wide$M2_t_3 ==0, 0,1),
+             Z_latent_M1t3 = ifelse(digCom_workdf_wide$M1_t_3 ==0, 0,1),
+             Dt3 = digCom_workdf_wide$D_t_3,
+             Zt3 = digCom_workdf_wide$Z_t_3,
+             
+             
+             #### t=2
+             M2t2 =  digCom_workdf_wide$M2_t_2,
+             M1t2 = digCom_workdf_wide$M1_t_2,
+             Z_latent_M2t2 = ifelse(digCom_workdf_wide$M2_t_2 ==0, 0,1),
+             Z_latent_M1t2 = ifelse(digCom_workdf_wide$M1_t_2 ==0, 0,1),
+             Dt2 = digCom_workdf_wide$D_t_2,
+             Zt2 = digCom_workdf_wide$Z_t_2,
+             
+             
+             #### t=1
+             M2t1 =  digCom_workdf_wide$M2_t_1,
+             M1t1 = digCom_workdf_wide$M1_t_1,
+             Z_latent_M2t1 = ifelse(digCom_workdf_wide$M2_t_1 ==0, 0,1),
+             Z_latent_M1t1 = ifelse(digCom_workdf_wide$M1_t_1 ==0, 0,1),
+             Dt1 = digCom_workdf_wide$D_t_1,
+             Zt1 = digCom_workdf_wide$Z_t_1,
+             
+             
+             # data for baseline confounders
+            
+             
+             # regression design matrices
+             Y_param_reg_design_mat = cbind(L0_df_wide$Intercept, Y_param_reg_design_mat),
+             M2t3_param_reg_design_mat = cbind(L0_df_wide$Intercept, M2t3_param_reg_design_mat),
+             M1t3_param_reg_design_mat = cbind(L0_df_wide$Intercept, M1t3_param_reg_design_mat),
+             Dt3_param_reg_design_mat = cbind(L0_df_wide$Intercept, Dt3_param_reg_design_mat),
+             Zt3_param_reg_design_mat = cbind(L0_df_wide$Intercept, Zt3_param_reg_design_mat),
+             M2t2_param_reg_design_mat = cbind(L0_df_wide$Intercept, M2t2_param_reg_design_mat),
+             M1t2_param_reg_design_mat = cbind(L0_df_wide$Intercept, M1t2_param_reg_design_mat),
+             Dt2_param_reg_design_mat = cbind(L0_df_wide$Intercept, Dt2_param_reg_design_mat),
+             Zt2_param_reg_design_mat = cbind(L0_df_wide$Intercept, Zt2_param_reg_design_mat),
+             M2t1_param_reg_design_mat = cbind(L0_df_wide$Intercept, M2t1_param_reg_design_mat),
+             M1t1_param_reg_design_mat = cbind(L0_df_wide$Intercept, M1t1_param_reg_design_mat),
+             Dt1_param_reg_design_mat = cbind(L0_df_wide$Intercept, Dt1_param_reg_design_mat),
+             Zt1_param_reg_design_mat = cbind(L0_df_wide$Intercept, Zt1_param_reg_design_mat)
+             
+             
+)
+
+
+inits_DG <- list(
+  # outcome model parameters
+  beta_Yi = rep(0, constants_DG$num_Y_reg_coeff),
+  sigma_sq_Yi = rinvgamma(1, 1, 1),
+  pi0_Y = 0.5,
+  Y_pos = rep(mean(digCom_workdf_wide$Y_t_3), constants_DG$n),
+  #Z_latent_Y = ifelse(digCom_workdf_wide$Y_t_3 ==0, 0,1),
+  
+  # mediator parameters at t =3
+  #bi_M2_sig_sq = rinvgamma(1, 1, 1),
+  #bi_M2 = rep(0,constants_DG$n),
+  theta_M2_t3 = rep(0,constants_DG$num_M2t3_reg_coeff),
+  theta_M1_t3 = rep(0,constants_DG$num_M1t3_reg_coeff),
+  sigma_sq_M2_t3 = rinvgamma(1, 1, 1),
+  sigma_sq_M1_t3 = rinvgamma(1, 1, 1),
+  pi0_M2_t3 = 0.5,
+  pi0_M1_t3 = 0.5,
+  data_wide_M2t3_pos = rep(mean(digCom_workdf_wide$M2_t_3), constants_DG$n),
+  data_wide_M1t3_pos = rep(mean(digCom_workdf_wide$M1_t_3), constants_DG$n),
+  
+  
+  # mediator parameters at t =2
+  theta_M2_t2 = rep(0,constants_DG$num_M2t2_reg_coeff),
+  theta_M1_t2 = rep(0,constants_DG$num_M1t2_reg_coeff),
+  #Sigma_M1M2_t2 = matrix(rinvgamma(4, 1, 1), nrow = 2, ncol = 2, byrow = TRUE),
+  sigma_sq_M2_t2 = rinvgamma(1, 1, 1),
+  sigma_sq_M1_t2 = rinvgamma(1, 1, 1),
+  pi0_M2_t2 = 0.5,
+  pi0_M1_t2 = 0.5,
+  data_wide_M2t2_pos = rep(mean(digCom_workdf_wide$M2_t_2), constants_DG$n),
+  data_wide_M1t2_pos = rep(mean(digCom_workdf_wide$M1_t_2), constants_DG$n),
+  
+  
+  # mediator parameters at t =1
+  theta_M2_t1 = rep(0,constants_DG$num_M2t1_reg_coeff),
+  theta_M1_t1 = rep(0,constants_DG$num_M1t1_reg_coeff),
+  #Sigma_M1M2_t1 = matrix(rinvgamma(4, 1, 1), nrow = 2, ncol = 2, byrow = TRUE),
+  sigma_sq_M2_t1 = rinvgamma(1, 1, 1),
+  sigma_sq_M1_t1 = rinvgamma(1, 1, 1),
+  pi0_M2_t1 = 0.5,
+  pi0_M1_t1 = 0.5,
+  data_wide_M2t1_pos = rep(mean(digCom_workdf_wide$M2_t_1), constants_DG$n),
+  data_wide_M1t1_pos = rep(mean(digCom_workdf_wide$M1_t_1), constants_DG$n),
+  
+  
+  # treatment receipt parameters 
+  theta_D_t3 = rep(0,constants_DG$num_Dt3_reg_coeff),
+  theta_D_t2 = rep(0,constants_DG$num_Dt2_reg_coeff),
+  theta_D_t1 = rep(0,constants_DG$num_Dt1_reg_coeff),
+  
+  
+  # treatment assignment parameters
+  theta_Z_t3 = rep(0,constants_DG$num_Zt3_reg_coeff),
+  theta_Z_t2 = rep(0,constants_DG$num_Zt2_reg_coeff),
+  theta_Z_t1 = rep(0,constants_DG$num_Zt1_reg_coeff)
+)
+
+
+Param_data_generating_model <- nimbleModel(code_DG, constants_DG, data_DG, inits_DG)  # model creation
+
+
+compile_Param_data_generating_model <- compileNimble(Param_data_generating_model, showCompilerOutput = TRUE)  # model compilation
+
+# MCMC configuration
+config_MCMC_DG <- configureMCMC(Param_data_generating_model, useConjugacy = TRUE,
+                             enableWAIC = TRUE,
+                             monitors = c("beta_Yi", "sigma_sq_Yi", "pi0_Y",  
+                                          #"bi_M2_sig_sq",  
+                                          "theta_M2_t3", "theta_M1_t3", "sigma_sq_M2_t3", "sigma_sq_M1_t3", "pi0_M2_t3", "pi0_M1_t3",
+                                          "theta_M2_t2", "theta_M1_t2", "sigma_sq_M2_t2", "sigma_sq_M1_t2", "pi0_M2_t2", "pi0_M1_t2",
+                                          "theta_M2_t1", "theta_M1_t1", "sigma_sq_M2_t1", "sigma_sq_M1_t1", "pi0_M2_t1", "pi0_M1_t1",
+                                          "theta_D_t1","theta_D_t2", "theta_D_t3",
+                                          "theta_Z_t1","theta_Z_t2", "theta_Z_t3",
+                                          "logDens"))
+
+
+config_MCMC_DG$removeSamplers('logDens')   ## remove sampler assigned to 'logDens'
+config_MCMC_DG$addSampler(target = 'logDens', type = 'sumLogPostDens')   ## add our custom sampler
+
+
+mcmc_DG <- buildMCMC(config_MCMC_DG)
+cmcmc_DG <- compileNimble(mcmc_DG, project = Param_data_generating_model, showCompilerOutput = TRUE)
+
+# burn-in 8000 iterations and save 1 iter for data generation
+num_iter_DG = 15000;  num_burnin_DG = 10000;  num_thin_DG = 5;  num_chains_DG= 1
+
+
+samples_allChains_DG <- runMCMC(cmcmc_DG, niter = num_iter_DG, nburnin = num_burnin_DG,
+                             nchains = num_chains_DG, 
+                             setSeed = TRUE, thin = num_thin_DG, WAIC = TRUE)
+
+post_samples_data_generating_model_list <- samples_allChains_DG$samples   # list of nchains matrices
+
+
+param_samples_data_generating_model_df <- as.data.frame(post_samples_data_generating_model_list)
+
+# only keep the posterior means of the parameters
+
+```
+
+
+## G-Computation
+
+## Code for Parametric G-computation
+
+```{r}
+
+sample_L0_bin_multiple = function(L0_obs_bin_data_no_intercept, # dataframe of all binary baseline confounders
+                                  num_MC_samples
+){
+  
+  probs = colMeans(L0_obs_bin_data_no_intercept)  
+  
+  return_df = as.data.frame(
+    matrix(rbinom(num_MC_samples * length(probs), size = 1, prob = rep(probs, each = num_MC_samples)), 
+           nrow = num_MC_samples, ncol = length(probs))
+  )
+  
+  
+  return(return_df)
+  
+}
+
+
+sample_Zt = function(MCdata,                             # MC data upto this point in the temporal order
+                     Param_coeffs_df,
+                     num_MC_samples,                     # number of MC samples to be generated
+                     #num_L0,                             # number of L0 INCLUDING intercept
+                     t,                                  # t = {1, ..., T}
+                     it                                  # an integer from 1:Q (number of post iterations)
+){
+  
+  # get parameter samples for this iteration at time = t
+  param_coeff_theta_Zt_vec = c()
+  for(k in 1:ncol(MCdata)){
+    theta_Zt_colnames_ordered = paste0("theta_Z_t",t,"[",k,"]")
+    
+    theta_Zt_colnames =  theta_Zt_colnames_ordered[theta_Zt_colnames_ordered %in%
+                                                     colnames(Param_coeffs_df)]
+    #df with nrow = N.M, ncol = num_L0
+    param_coeff_theta_Zt_vec[k] = as.numeric(sapply(theta_Zt_colnames, 
+                                                    function(col_name) Param_coeffs_df[[col_name]][it]))
+  }
+  
+  
+  Z_t_prob = pnorm(as.matrix(MCdata) %*% param_coeff_theta_Zt_vec)
+  
+  Z_t_vec = rbinom(n = num_MC_samples, size = 1, prob = Z_t_prob)
+  
+  return(Z_t_vec)
+  
+}
+
+
+sample_Dt = function(MCdata,                             # MC data upto this point in the temporal order
+                     Param_coeffs_df,
+                     num_MC_samples,                     # number of MC samples to be generated
+                     #num_L0,                             # number of L0 INCLUDING intercept
+                     t,                                  # t = {1, ..., T}
+                     it                                  # an integer from 1:Q (number of post iterations)
+){
+  
+  # get parameter samples for this iteration at time = t
+  param_coeff_theta_Dt_vec = c()
+  for(k in 1:ncol(MCdata)){
+    theta_Dt_colnames_ordered = paste0("theta_D_t",t,"[",k,"]")
+    
+    theta_Dt_colnames =  theta_Dt_colnames_ordered[theta_Dt_colnames_ordered %in%
+                                                     colnames(Param_coeffs_df)]
+    #df with nrow = N.M, ncol = num_L0
+    param_coeff_theta_Dt_vec[k] = as.numeric(sapply(theta_Dt_colnames, 
+                                                    function(col_name) Param_coeffs_df[[col_name]][it]))
+  }
+  
+  
+  D_t_prob = pnorm(as.matrix(MCdata) %*% param_coeff_theta_Dt_vec)
+  
+  D_t_vec = rbinom(n = num_MC_samples, size = 1, prob = D_t_prob)
+  
+  return(D_t_vec)
+  
+}
+
+
+sample_allMediators_Mt = function(MCdata,                # MC data upto this point in the temporal order
+                                  Param_coeffs_df,
+                                  num_MC_samples,                     # number of MC samples to be generated
+                                  number_of_mediators,                # number of mediators
+                                  t,                                  # t = {1, ..., T}
+                                  it                                  # an integer from 1:Q (number of post iterations)
+){
+  
+  param_coeff_theta_Mt_mat = matrix(NA, nrow = ncol(MCdata), ncol = number_of_mediators) # each column contains regression mean coeffs for a mediator
+  param_coeff_sigSq_Mt_vec = c()
+  param_coeff_pi0_Mt_vec = c()
+  for(j in 1:number_of_mediators){
+    theta_Mt_colnames_ordered = unlist(
+      lapply(1:ncol(MCdata), function(k) paste0("theta_M",j,"_t",t,"[",k,"]"))
+    )
+    
+    theta_Mt_colnames =  theta_Mt_colnames_ordered[theta_Mt_colnames_ordered %in%
+                                                     colnames(Param_coeffs_df)]
+    #df with nrow = N.M, ncol = num_L0
+    param_coeff_theta_Mt_mat[,j] = as.numeric(sapply(theta_Mt_colnames, 
+                                                     function(col_name) Param_coeffs_df[[col_name]][it]))
+    
+    
+    sigSq_Mt_colnames_ordered = paste0("sigma_sq_M",j,"_t",t)
+    
+    sigSq_Mt_colnames =  sigSq_Mt_colnames_ordered[sigSq_Mt_colnames_ordered %in%
+                                                     colnames(Param_coeffs_df)]
+    #df with nrow = N.M, ncol = num_L0
+    param_coeff_sigSq_Mt_vec[j] = as.numeric(sapply(sigSq_Mt_colnames, 
+                                                    function(col_name) Param_coeffs_df[[col_name]][it]))
+    
+    
+    pi0_Mt_colnames_ordered = paste0("pi0_M",j,"_t",t)
+    
+    pi0_Mt_colnames =  pi0_Mt_colnames_ordered[pi0_Mt_colnames_ordered %in%
+                                                 colnames(Param_coeffs_df)]
+    
+    param_coeff_pi0_Mt_vec[j] = as.numeric(sapply(pi0_Mt_colnames, 
+                                                  function(col_name) Param_coeffs_df[[col_name]][it]))
+    
+    
+  }
+  
+  
+  ##################Get coeffs for the random effects###############################
+  Sigma_b_M1M2_t_col_name = sapply(1:number_of_mediators, function(mediator_num) {
+    paste0("Sigma_b_M1M2_t",t,"[", mediator_num, ", ", 1:number_of_mediators, "]")  # Column names for Sigma_b_M1M2_t1[1,1] to Sigma_b_M1M2_t1[2,2]
+  })
+  
+  # matrix of dimension J by J for J mediators
+  Sigma_b_M1M2_t_mat = apply(Sigma_b_M1M2_t_col_name, c(1,2),
+                             function(col_name){Param_coeffs_df[[col_name]][it]}) 
+  
+  #b_M1M2_t_df is a df of dimensions num_MC_samples by length(zero_vec)
+  b_M1M2_t_mat = as.matrix(rmvnorm(n = num_MC_samples, mean = zero_vec, sigma = Sigma_b_M1M2_t_mat))   #random intercepts
+  
+  
+  # Generate both M1 and M2
+  
+  #M1M2_pos_indicator_df is a df of dimensions num_MC_samples by length(zero_vec)
+  M1M2_pos_indicator_df =  as.data.frame(
+    matrix(rbinom(num_MC_samples * length(param_coeff_pi0_Mt_vec), 
+                  size = 1, 
+                  prob = rep(1-param_coeff_pi0_Mt_vec, each = num_MC_samples)),
+           nrow = num_MC_samples, ncol = length(param_coeff_pi0_Mt_vec))
+  )
+  
+  M1M2_pos_mean_df = (as.matrix(MCdata) %*% param_coeff_theta_Mt_mat) +  b_M1M2_t_mat # Result: [num_MC_samples × num_of_mediators]
+  
+  truncnorm_samples = matrix(NA, nrow = num_MC_samples, ncol = number_of_mediators)
+  for (j in 1:number_of_mediators) {
+    truncnorm_samples[, j] = rtruncnorm(
+      n = num_MC_samples,
+      a = 0,                
+      b = Inf,                 
+      mean = M1M2_pos_mean_df[, j],     
+      sd = sqrt(param_coeff_sigSq_Mt_vec[j])           
+    ) * M1M2_pos_indicator_df[,j]
+  }
+  
+  
+  return_df = as.data.frame(truncnorm_samples)
+  return(return_df)
+}
+
+
+sample_Mediator_Mt = function(MCdata,                # MC data upto this point in the temporal order
+                              Param_coeffs_df,
+                              num_MC_samples,                     # number of MC samples to be generated
+                              mediator_number,                   # 1 to J (num of mediators)
+                              t,                                  # t = {1, ..., T}
+                              it                                  # an integer from 1:Q (number of post iterations)
+){
+  
+  
+  param_coeff_theta_Mt_vec = c()
+  for(k in 1:ncol(MCdata)){
+    theta_Mt_colnames_ordered = paste0("theta_M",mediator_number,"_t",t,"[",k,"]")
+    
+    
+    theta_Mt_colnames =  theta_Mt_colnames_ordered[theta_Mt_colnames_ordered %in%
+                                                     colnames(Param_coeffs_df)]
+    #df with nrow = N.M, ncol = num_L0
+    param_coeff_theta_Mt_vec[k] = as.numeric(sapply(theta_Mt_colnames, 
+                                                    function(col_name) Param_coeffs_df[[col_name]][it]))
+  }
+  
+  
+  sigSq_Mt_colnames_ordered = paste0("sigma_sq_M",mediator_number,"_t",t)
+  
+  sigSq_Mt_colnames =  sigSq_Mt_colnames_ordered[sigSq_Mt_colnames_ordered %in%
+                                                   colnames(Param_coeffs_df)]
+  #df with nrow = N.M, ncol = num_L0
+  param_coeff_sigSq_Mt = as.numeric(sapply(sigSq_Mt_colnames, 
+                                           function(col_name) Param_coeffs_df[[col_name]][it]))
+  
+  
+  pi0_Mt_colnames_ordered = paste0("pi0_M",mediator_number,"_t",t)
+  
+  pi0_Mt_colnames =  pi0_Mt_colnames_ordered[pi0_Mt_colnames_ordered %in%
+                                               colnames(Param_coeffs_df)]
+  
+  param_coeff_pi0_Mt = as.numeric(sapply(pi0_Mt_colnames, 
+                                         function(col_name) Param_coeffs_df[[col_name]][it]))
+  
+  
+  # Generate both M1 and M2
+  
+  #Mt_pos_indicator_df is a df of dimensions num_MC_samples by length(zero_vec)
+  Mt_pos_indicator =  rbinom(num_MC_samples, 
+                             size = 1, 
+                             prob = rep(1-param_coeff_pi0_Mt))
+  
+  Mt_pos_mean_df = (as.matrix(MCdata) %*% param_coeff_theta_Mt_vec)  # Result: [num_MC_samples × 1]
+  
+  
+  truncnorm_samples = rtruncnorm(
+    n = num_MC_samples,
+    a = 0,                
+    b = 10,                 
+    mean = Mt_pos_mean_df,     
+    sd = sqrt(param_coeff_sigSq_Mt)           
+  ) * Mt_pos_indicator
+  
+  
+  return(as.numeric(truncnorm_samples))
+}
+
+
+compute_Y_mean = function(MCdata,                # MC data upto this point in the temporal order
+                          Param_coeffs_df,
+                          num_MC_samples,                     # number of MC samples to be generated
+                          it                                  # an integer from 1:Q (number of post iterations)
+){
+  
+  param_coeff_beta_Yi_vec = c() 
+  for(k in 1:ncol(MCdata)){
+    beta_Yi_colnames_ordered = paste0("beta_Yi[",k,"]")
+    
+    beta_Yi_colnames =  beta_Yi_colnames_ordered[beta_Yi_colnames_ordered %in%
+                                                   colnames(Param_coeffs_df)]
+    param_coeff_beta_Yi_vec[k] = as.numeric(sapply(beta_Yi_colnames, 
+                                                   function(col_name) Param_coeffs_df[[col_name]][it]))
+  }
+  
+  
+  sigSq_Yi_colnames_ordered = paste0("sigma_sq_Yi")
+  sigSq_Yi_colnames =  sigSq_Yi_colnames_ordered[sigSq_Yi_colnames_ordered %in%
+                                                   colnames(Param_coeffs_df)]
+  param_coeff_sigSq_Yi = as.numeric(sapply(sigSq_Yi_colnames, 
+                                           function(col_name) Param_coeffs_df[[col_name]][it]))
+  
+  
+  pi0_Y_colnames_ordered = paste0("pi0_Y")
+  pi0_Y_colnames =  pi0_Y_colnames_ordered[pi0_Y_colnames_ordered %in%
+                                             colnames(Param_coeffs_df)]
+  param_coeff_pi0_Y = as.numeric(sapply(pi0_Y_colnames, 
+                                        function(col_name) Param_coeffs_df[[col_name]][it]))
+  
+  
+  # Generate Yi
+  #Y_pos_indicator_vec is a vec of length num_MC_samples 
+  Y_pos_indicator_vec =  rbinom(n = num_MC_samples,
+                                size = 1,
+                                prob = 1-param_coeff_pi0_Y)
+  Y_pos_mean_vec = (as.matrix(MCdata) %*% param_coeff_beta_Yi_vec)
+  
+  
+  #compute mean of truncated Normal
+  z = -Y_pos_mean_vec/sqrt(param_coeff_sigSq_Yi)
+  phi_z = dnorm(z)  # PDF of the standard normal at z
+  Phi_z = pnorm(z)  # CDF of the standard normal at z
+  trunc_norm_param_denom = pmax(1 - Phi_z, 1e-10)
+  trunc_norm_mean_vec = Y_pos_mean_vec + (phi_z / trunc_norm_param_denom) * sqrt(param_coeff_sigSq_Yi)
+  
+  
+  # E[Y|...] = (1-pi0) * E[trunc_norm]
+  mean_Y_hurdle = trunc_norm_mean_vec * (1 - param_coeff_pi0_Y)
+
+  return(mean_Y_hurdle)
+}
+
+
+####################################################################
+######.............Function for MC integration .............########
+MCInteg <- function(var.type, # Vector of variable specifications for data.  Fi=fixed (e.g. the exposure), D=trt received, M1= mediator 1,  M2= mediator 2, Y=outcome. 
+                    Param_coeffs, #fitted BNP model parameter samples list
+                    fixed.regime.trt, # A vector specifying the Exposure  regime Z
+                    fixed.regime.control, # A vector specifying the Exposure  regime Z_star
+                    U1,       # could be one of: "c" for VALUE ATTENTIVE, "d" for PRICE ATTENTIVE, "n" for NON-ACTIVE CUSTOMERS and "a" for ACTIVE CUSTOMERS
+                    J=10000, # Size of pseudo data. Default is set to 2,000.
+                    Ndraws=1000, # Number of posterior draws. Default is set to 200.
+                    L0_obs_data_no_intercept, #matrix of all baseline confounders excluding the intercept
+                    num_Bin_L0,
+                    num_Cont_L0,
+                    max_t,
+                    ...
+){
+  
+  n_Y <- length(which(var.type=="Y")) # Number of outcome variables, should be equal to 1
+  n_L0 <- length(which(var.type=="L0")) # Number of baseline confounder variables INCLUDING the intercept, >1 allowed
+  n_Fi <- length(which(var.type=="Fi")) # Number of fixed variables, >1 allowed
+  if(!is.null(fixed.regime.trt)) {
+    n_Reg_trt <- max(ifelse(!is.null(fixed.regime.trt), length(fixed.regime.trt), 0))
+  } else {
+    n_Reg_trt <- 1
+  }
+  
+  if(!is.null(fixed.regime.control)) {
+    n_Reg_control <- max(ifelse(!is.null(fixed.regime.control), length(fixed.regime.control), 0))
+  } else {
+    n_Reg_control <- 1
+  }
+  
+  if (n_Y != 1) stop("The number of outcome variables is not equal to 1 ")
+  #if (ncol(data) != length(var.type)) stop("The number of columns in data is not equal to the length of var.type ")
+  
+  if(!is.null(fixed.regime.trt)){
+    if (length(fixed.regime.trt) != n_Fi) stop("Warning: The number of fixed variables is not equal to the length of the fixed regime(s)")
+  }
+  
+  if(!is.null(fixed.regime.control)){
+    if (length(fixed.regime.control) != n_Fi) stop("Warning: The number of fixed variables is not equal to the length of the fixed regime(s)")
+  }
+  
+  if (!(U1 %in% c("c", "d", "n", "a"))) {
+    stop("U1 must be one of 'c', 'd', 'n', or 'a'")
+  }
+  
+  
+  ########################################################
+  ## Create matrices to store the output. 
+  
+  
+  Y_zzstar_mat <- matrix(nrow =  1 , ncol = Ndraws)
+  MC_error_vec = c()
+  
+  
+  for(it in 1:Ndraws) {
+    zt <- 1                               # zt indexes FIXED longitudinal trt regime in G-comp
+    dt <- 1
+    mt <- 1
+    intercept = rep(1, J)
+    
+    
+    ################### We only have binary L0 in replicated dataframe###########################################   
+    L0_bin_sampled_mat_iter = NULL # initialize a matrix to store samples
+    L0_bin_sampled_mat_iter = sample_L0_bin_multiple(L0_obs_bin_data_no_intercept = L0_obs_data_no_intercept[, 1:num_Bin_L0], 
+                                                     num_MC_samples= J)
+    L0_data = cbind(intercept, L0_bin_sampled_mat_iter)
+    
+    
+    # design matrix for regression (initialize with L0_data)
+    
+    Zt_mat_MCdata_trt = matrix(NA, nrow = J, ncol = max_t)
+    Dt_mat_MCdata_trt = matrix(NA, nrow = J, ncol = max_t)
+    M1t_mat_MCdata_trt = matrix(NA, nrow = J, ncol = max_t)
+    M2t_mat_MCdata_trt = matrix(NA, nrow = J, ncol = max_t)
+    
+    
+    Zt_mat_MCdata_control = matrix(NA, nrow = J, ncol = max_t)
+    Dt_mat_MCdata_control = matrix(NA, nrow = J, ncol = max_t)
+    M1t_mat_MCdata_control = matrix(NA, nrow = J, ncol = max_t)
+    M2t_mat_MCdata_control = matrix(NA, nrow = J, ncol = max_t)
+    
+    
+    Z1_trt = rep(fixed.regime.trt[1], J)
+    Z1_control = rep(fixed.regime.control[1], J)
+    
+    if (U1 == "c") {
+      D1_trt = Z1_trt
+      D1_control = Z1_control
+    } else if (U1 == "d") {
+      D1_trt = 1- Z1_trt
+      D1_control = 1-Z1_control
+    } else if (U1 == "n") {
+      D1_trt = rep(0,J)
+      D1_control = rep(0,J)
+    } else if (U1 == "a") {
+      D1_trt = rep(1,J)
+      D1_control = rep(1,J)
+    }
+    
+    
+    for (j in (n_L0+1):length(var.type)) {                                         
+      
+      if(var.type[j] == "Fi") {
+        Zt_mat_MCdata_trt[,zt] = rep(fixed.regime.trt[zt], J)
+        Zt_mat_MCdata_control[,zt] = rep(fixed.regime.control[zt], J)
+        zt = zt + 1
+      }
+      else if(var.type[j] == "Dt") {
+        
+        if(dt == 1){
+          Dt_mat_MCdata_trt[,dt] = D1_trt
+          Dt_mat_MCdata_control[,dt] = D1_control
+        }else{
+          Dt_sampled_vec_iter_trt =sample_Dt(MCdata = cbind(L0_data, Dt_mat_MCdata_trt[,dt-1],
+                                                            M1t_mat_MCdata_trt[,dt-1], M2t_mat_MCdata_trt[,dt-1],
+                                                            Zt_mat_MCdata_trt[,dt]),                             
+                                             Param_coeffs_df = Param_coeffs,
+                                             num_MC_samples = J,                     
+                                             t = dt,                                  
+                                             it = it)
+          Dt_sampled_vec_iter_control =sample_Dt(MCdata = cbind(L0_data, Dt_mat_MCdata_control[,dt-1],
+                                                                M1t_mat_MCdata_control[,dt-1], M2t_mat_MCdata_control[,dt-1],
+                                                                Zt_mat_MCdata_control[,dt]),                            
+                                                 Param_coeffs_df = Param_coeffs,
+                                                 num_MC_samples = J,                     
+                                                 t = dt,                                  
+                                                 it = it)
+          
+          
+          Dt_mat_MCdata_trt[,dt] =  Dt_sampled_vec_iter_trt
+          Dt_mat_MCdata_control[,dt] =  Dt_sampled_vec_iter_control
+        }
+        dt = dt +1
+      }
+      else if(var.type[j] == "M1t") { 
+        if(mt == 1){
+          M1t_sampled_vec_iter_trt = sample_Mediator_Mt(MCdata = cbind(L0_data, Zt_mat_MCdata_trt[,1], Dt_mat_MCdata_trt[,1]),
+                                                        Param_coeffs_df = Param_coeffs,
+                                                        num_MC_samples = J,                     
+                                                        mediator_number =  1,                
+                                                        t = mt,                                  
+                                                        it = it)
+            
+            
+          M1t_sampled_vec_iter_control =sample_Mediator_Mt(MCdata = cbind(L0_data, Zt_mat_MCdata_control[,1], Dt_mat_MCdata_control[,1]),
+                                                           Param_coeffs_df = Param_coeffs,
+                                                           num_MC_samples = J,                     
+                                                           mediator_number =  1,                
+                                                           t = mt,                                  
+                                                           it = it)
+          
+          
+          M1t_mat_MCdata_trt[,1] =  M1t_sampled_vec_iter_trt
+          M1t_mat_MCdata_control[,1] =  M1t_sampled_vec_iter_control
+          
+        }else{
+          M1t_sampled_vec_iter_trt = sample_Mediator_Mt(MCdata = cbind(L0_data, M1t_mat_MCdata_trt[,mt-1], M2t_mat_MCdata_trt[,mt-1],
+                                                                       Zt_mat_MCdata_trt[,mt], Dt_mat_MCdata_trt[,mt]),
+                                                        Param_coeffs_df = Param_coeffs,
+                                                        num_MC_samples = J,                     
+                                                        mediator_number =  1,                
+                                                        t = mt,                                  
+                                                        it = it)
+          
+          
+          M1t_sampled_vec_iter_control =sample_Mediator_Mt(MCdata = cbind(L0_data, M1t_mat_MCdata_control[,mt-1], M2t_mat_MCdata_control[,mt-1],
+                                                                          Zt_mat_MCdata_control[,mt], Dt_mat_MCdata_control[,mt]),
+                                                           Param_coeffs_df = Param_coeffs,
+                                                           num_MC_samples = J,                     
+                                                           mediator_number =  1,                
+                                                           t = mt,                                  
+                                                           it = it)
+          
+          
+          M1t_mat_MCdata_trt[,mt] =  M1t_sampled_vec_iter_trt
+          M1t_mat_MCdata_control[,mt] =  M1t_sampled_vec_iter_control  
+        }
+        
+        
+      }
+      else if(var.type[j] == "M2t") { 
+        if(mt == 1){
+          M2t_sampled_vec_iter_trt = sample_Mediator_Mt(MCdata = cbind(L0_data, Zt_mat_MCdata_trt[,1], Dt_mat_MCdata_trt[,1],
+                                                                       M1t_mat_MCdata_trt[,1]),
+                                                        Param_coeffs_df = Param_coeffs,
+                                                        num_MC_samples = J,                     
+                                                        mediator_number =  2,                
+                                                        t = mt,                                  
+                                                        it = it)
+          
+          
+          M2t_sampled_vec_iter_control =sample_Mediator_Mt(MCdata = cbind(L0_data, Zt_mat_MCdata_control[,1], Dt_mat_MCdata_control[,1],
+                                                                          M1t_mat_MCdata_control[,1]),
+                                                           Param_coeffs_df = Param_coeffs,
+                                                           num_MC_samples = J,                     
+                                                           mediator_number =  2,                
+                                                           t = mt,                                  
+                                                           it = it)
+          
+          M2t_mat_MCdata_trt[,1] =  M2t_sampled_vec_iter_trt
+          M2t_mat_MCdata_control[,1] =  M2t_sampled_vec_iter_control
+          
+          
+        }else{
+          M2t_sampled_vec_iter_trt = sample_Mediator_Mt(MCdata = cbind(L0_data, M2t_mat_MCdata_trt[,mt-1],
+                                                                       Zt_mat_MCdata_trt[,mt], Dt_mat_MCdata_trt[,mt],
+                                                                       M1t_mat_MCdata_trt[,mt]),
+                                                        Param_coeffs_df = Param_coeffs,
+                                                        num_MC_samples = J,                     
+                                                        mediator_number =  2,                
+                                                        t = mt,                                  
+                                                        it = it)
+          
+          
+          M2t_sampled_vec_iter_control =sample_Mediator_Mt(MCdata = cbind(L0_data,  M2t_mat_MCdata_control[,mt-1],
+                                                                          Zt_mat_MCdata_control[,mt], Dt_mat_MCdata_control[,mt],
+                                                                          M1t_mat_MCdata_control[,mt]),
+                                                           Param_coeffs_df = Param_coeffs,
+                                                           num_MC_samples = J,                     
+                                                           mediator_number =  2,                
+                                                           t = mt,                                  
+                                                           it = it)
+          
+          M2t_mat_MCdata_trt[,mt] =  M2t_sampled_vec_iter_trt
+          M2t_mat_MCdata_control[,mt] =  M2t_sampled_vec_iter_control 
+          
+        }
+        
+        
+        mt = mt + 1
+        
+      }
+      
+      else if(var.type[j] == "Y") {
+        Y_mean_vec = compute_Y_mean(MCdata = cbind(L0_data,  
+                                                   Zt_mat_MCdata_trt[,ncol(Zt_mat_MCdata_trt)],
+                                                   Dt_mat_MCdata_trt[,ncol(Dt_mat_MCdata_trt)],
+                                                   M1t_mat_MCdata_control[,ncol(M1t_mat_MCdata_control)],
+                                                   M2t_mat_MCdata_control[,ncol(M2t_mat_MCdata_control)]),                
+                                    Param_coeffs_df = Param_coeffs,
+                                    num_MC_samples = J,                     
+                                    it = it)
+        
+        
+        Y_zzstar_mat[1,it] = mean(Y_mean_vec)
+        MC_error_vec[it] = sd(Y_mean_vec) / sqrt(length(Y_mean_vec))
+        if(it == 500){
+          mc_error = sd(Y_mean_vec) / sqrt(length(Y_mean_vec))
+        }
+      }
+    }
+  }
+  MC_error_to_post_SD = MC_error_vec/ sd(as.numeric(Y_zzstar_mat[1,]))
+  return(Y_zzstar_mat)
+}
+
+
+compute_PIDE = function(theta_10, theta_00){
+  return(theta_10 - theta_00)
+}
+
+compute_PJIIE = function(theta_11, theta_10){
+  return(theta_11 - theta_10)
+}
+
+
+compute_PJIIE2 = function(PCE, PIDE){
+  return(PCE - PIDE)
+}
+
+
+compute_PCE = function(PIDE, PJIIE){
+  return(PIDE+PJIIE)
+}
+
+compute_total_effects = function(theta_11, theta_00){
+  return(theta_11 - theta_00)
+}
+
+
+calculate_95bayesian_credible_interval  = function(data_row){
+  posterior_samples = as.numeric(data_row)
+  posterior_mean =  as.numeric(format(round(mean(posterior_samples) , 4), nsmall = 4))
+  #posterior_median =  as.numeric(format(round(median(posterior_samples) , 4), nsmall = 4))
+  quantiles = quantile(posterior_samples, c(0.025, 0.975))
+  interval = as.numeric(format(round(quantiles, 4), nsmall = 4))
+  return_df = data.frame(posterior_mean = posterior_mean, 
+                         lower_95CI = interval[1],   upper_95CI = interval[2])
+  return(return_df)
+}
+
+
+library(tidyr)
+
+plot_ConfInt <-function(conf_int_mat) { 
+  conf_int_df = data.frame(conf_int_mat)
+  conf_int_df$CI <- 1:nrow(conf_int_df)
+  ci_long <- gather(conf_int_df, key = "Bound", value = "Value", -CI)
+  ggplot(ci_long, aes(x = CI, ymin = Value, ymax = Value, color = Bound )) +
+    geom_errorbar(width = 0.2)+
+    labs(x = "Visits", y = "Confidence/Credible Intervals")+
+    scale_color_manual(values = c("lower" = "red", "upper" = "blue")) +
+    theme_minimal()
+  
+}
+
+
+```
+
+
+## Function Call
+```{r}
+
+input_varType1 = c("L0","L0","L0","Fi", "Dt", "M1t","M2t", "Fi", "Dt", "M1t","M2t","Fi", "Dt", "M1t","M2t", "Y")
+
+
+#########################################ACTIVE CUSTOMERS#################################################
+
+
+active_customer_theta_zzstar = MCInteg(var.type = input_varType1,
+                                    Param_coeffs = param_samples_data_generating_model_df,
+                                    fixed.regime.trt = rep(1,3),
+                                    fixed.regime.control = rep(0,3),
+                                    U1 = "a",            
+                                    J=10000, 
+                                    Ndraws= 1000, 
+                                    L0_obs_data_no_intercept = L0_df_wide[2:3],
+                                    num_Bin_L0 = 2, 
+                                    num_Cont_L0 = 0,
+                                    max_t = 3)
+
+
+active_customer_theta_zz = MCInteg(var.type = input_varType1,
+                                Param_coeffs = param_samples_data_generating_model_df,
+                                fixed.regime.trt = rep(1,3),
+                                fixed.regime.control = rep(1,3),
+                                U1 = "a",
+                                J=10000, 
+                                Ndraws= 1000, 
+                                L0_obs_data_no_intercept = L0_df_wide[2:3],
+                                num_Bin_L0 = 2, 
+                                num_Cont_L0 = 0,
+                                max_t = 3)
+
+
+active_customer_theta_zstarzstar = MCInteg(var.type = input_varType1,
+                                        Param_coeffs = param_samples_data_generating_model_df,
+                                        fixed.regime.trt = rep(0,3),
+                                        fixed.regime.control = rep(0,3),
+                                        U1 = "a",
+                                        J=10000, 
+                                        Ndraws= 1000, 
+                                        L0_obs_data_no_intercept = L0_df_wide[2:3],
+                                        num_Bin_L0 = 2, 
+                                        num_Cont_L0 = 0,
+                                        max_t = 3)
+
+
+active_customer_PIDE = compute_PIDE(active_customer_theta_zzstar, active_customer_theta_zstarzstar)
+active_customer_PIDE = mean(active_customer_PIDE, na.rm = TRUE)
+
+
+active_customer_PCE = compute_total_effects(active_customer_theta_zz,active_customer_theta_zstarzstar)
+active_customer_PCE = mean(active_customer_PCE, na.rm = TRUE)
+
+
+active_customer_PJIIE = compute_PJIIE2(active_customer_PCE, active_customer_PIDE)
+active_customer_PJIIE = mean(active_customer_PJIIE, na.rm = TRUE)
+
+
+#########################################Value Attentive#################################################
+
+
+value_attentive_theta_zzstar = MCInteg(var.type = input_varType1,
+                                    Param_coeffs = param_samples_data_generating_model_df,
+                                    fixed.regime.trt = rep(1,3),
+                                    fixed.regime.control = rep(0,3),
+                                    U1 = "c",            
+                                    J=10000, 
+                                    Ndraws= 1000, 
+                                    L0_obs_data_no_intercept = L0_df_wide[2:3],
+                                    num_Bin_L0 = 2, 
+                                    num_Cont_L0 = 0,
+                                    max_t = 3)
+
+
+value_attentive_theta_zz = MCInteg(var.type = input_varType1,
+                                Param_coeffs = param_samples_data_generating_model_df,
+                                fixed.regime.trt = rep(1,3),
+                                fixed.regime.control = rep(1,3),
+                                U1 = "c",
+                                J=10000, 
+                                Ndraws= 1000, 
+                                L0_obs_data_no_intercept = L0_df_wide[2:3],
+                                num_Bin_L0 = 2, 
+                                    num_Cont_L0 = 0,
+                                    max_t = 3)
+
+
+value_attentive_theta_zstarzstar = MCInteg(var.type = input_varType1,
+                                        Param_coeffs = param_samples_data_generating_model_df,
+                                        fixed.regime.trt = rep(0,3),
+                                        fixed.regime.control = rep(0,3),
+                                        U1 = "c",
+                                        J=10000, 
+                                        Ndraws= 1000, 
+                                        L0_obs_data_no_intercept = L0_df_wide[2:3],
+                                        num_Bin_L0 = 2, 
+                                    num_Cont_L0 = 0,
+                                    max_t = 3)
+
+
+value_attentive_PIDE = compute_PIDE(value_attentive_theta_zzstar, value_attentive_theta_zstarzstar)
+value_attentive_PIDE = mean(value_attentive_PIDE, na.rm = TRUE)
+
+
+value_attentive_PCE = compute_total_effects(value_attentive_theta_zz,value_attentive_theta_zstarzstar)
+value_attentive_PCE = mean(value_attentive_PCE, na.rm = TRUE)
+
+
+value_attentive_PJIIE = compute_PJIIE2(value_attentive_PCE, value_attentive_PIDE)
+value_attentive_PJIIE = mean(value_attentive_PJIIE, na.rm = TRUE)
+
+
+#########################################Price Attentive#################################################
+
+
+price_attentive_theta_zzstar = MCInteg(var.type = input_varType1,
+                                Param_coeffs = param_samples_data_generating_model_df,
+                                fixed.regime.trt = rep(1,3),
+                                fixed.regime.control = rep(0,3),
+                                U1 = "d",            
+                                J=10000, 
+                                Ndraws= 1000, 
+                                L0_obs_data_no_intercept = L0_df_wide[2:3],
+                                num_Bin_L0 = 2, 
+                                    num_Cont_L0 = 0,
+                                    max_t = 3)
+
+
+price_attentive_theta_zz = MCInteg(var.type = input_varType1,
+                            Param_coeffs = param_samples_data_generating_model_df,
+                            fixed.regime.trt = rep(1,3),
+                            fixed.regime.control = rep(1,3),
+                            U1 = "d",
+                            J=10000, 
+                            Ndraws= 1000, 
+                            L0_obs_data_no_intercept = L0_df_wide[2:3],
+                            num_Bin_L0 = 2, 
+                                    num_Cont_L0 = 0,
+                                    max_t = 3)
+
+
+price_attentive_theta_zstarzstar = MCInteg(var.type = input_varType1,
+                                    Param_coeffs = param_samples_data_generating_model_df,
+                                    fixed.regime.trt = rep(0,3),
+                                    fixed.regime.control = rep(0,3),
+                                    U1 = "d",
+                                    J=10000, 
+                                    Ndraws= 1000, 
+                                    L0_obs_data_no_intercept = L0_df_wide[2:3],
+                                    num_Bin_L0 = 2, 
+                                    num_Cont_L0 = 0,
+                                    max_t = 3)
+
+
+price_attentive_PIDE = compute_PIDE(price_attentive_theta_zzstar, price_attentive_theta_zstarzstar)
+price_attentive_PIDE = mean(price_attentive_PIDE, na.rm = TRUE)
+
+
+price_attentive_PCE = compute_total_effects(price_attentive_theta_zz,price_attentive_theta_zstarzstar)
+price_attentive_PCE = mean(price_attentive_PCE, na.rm = TRUE)
+
+
+price_attentive_PJIIE = compute_PJIIE2(price_attentive_PCE, price_attentive_PIDE)
+price_attentive_PJIIE = mean(price_attentive_PJIIE, na.rm = TRUE)
+
+
+#########################################Non-Active Customers#################################################
+
+
+non_active_customer_theta_zzstar = MCInteg(var.type = input_varType1,
+                              Param_coeffs = param_samples_data_generating_model_df,
+                              fixed.regime.trt = rep(1,3),
+                              fixed.regime.control = rep(0,3),
+                              U1 = "n",            
+                              J=10000, 
+                              Ndraws= 1000, 
+                              L0_obs_data_no_intercept = L0_df_wide[2:3],
+                              num_Bin_L0 = 2, 
+                                    num_Cont_L0 = 0,
+                                    max_t = 3)
+
+
+non_active_customer_theta_zz = MCInteg(var.type = input_varType1,
+                          Param_coeffs = param_samples_data_generating_model_df,
+                          fixed.regime.trt = rep(1,3),
+                          fixed.regime.control = rep(1,3),
+                          U1 = "n",
+                          J=10000, 
+                          Ndraws= 1000, 
+                          L0_obs_data_no_intercept = L0_df_wide[2:3],
+                          num_Bin_L0 = 2, 
+                                    num_Cont_L0 = 0,
+                                    max_t = 3)
+
+
+non_active_customer_theta_zstarzstar = MCInteg(var.type = input_varType1,
+                                  Param_coeffs = param_samples_data_generating_model_df,
+                                  fixed.regime.trt = rep(0,3),
+                                  fixed.regime.control = rep(0,3),
+                                  U1 = "n",
+                                  J=10000, 
+                                  Ndraws= 1000, 
+                                  L0_obs_data_no_intercept = L0_df_wide[2:3],
+                                  num_Bin_L0 = 2, 
+                                    num_Cont_L0 = 0,
+                                    max_t = 3)
+
+
+non_active_customer_PIDE = compute_PIDE(non_active_customer_theta_zzstar, non_active_customer_theta_zstarzstar)
+non_active_customer_PIDE = mean(non_active_customer_PIDE, na.rm = TRUE)
+
+ 
+non_active_customer_PCE = compute_total_effects(non_active_customer_theta_zz,non_active_customer_theta_zstarzstar)
+non_active_customer_PCE = mean(non_active_customer_PCE, na.rm = TRUE)
+
+
+non_active_customer_PJIIE = compute_PJIIE2(non_active_customer_PCE, non_active_customer_PIDE)
+non_active_customer_PJIIE = mean(non_active_customer_PJIIE, na.rm = TRUE)
+
+
+row_names = c("active_customers", "value_attentive", "price_attentive", "non_active_customers")
+direct_effects = c(active_customer_PIDE, value_attentive_PIDE, price_attentive_PIDE, non_active_customer_PIDE)
+indirect_effects = c(active_customer_PJIIE, value_attentive_PJIIE, price_attentive_PJIIE, non_active_customer_PJIIE)
+total_effects = c(active_customer_PCE, value_attentive_PCE, price_attentive_PCE, non_active_customer_PCE)
+
+
+true_causal_estimands = data.frame(PIDE = direct_effects, PJIIE= indirect_effects, PCE= total_effects)
+rownames(true_causal_estimands) = row_names
+true_causal_estimands
+
+
+###############################################################
+
+```
+
+
+## Results after running the simulation 500 times
+
+
+```{r}
+library(ggplot2)
+library(gridExtra)
+
+
+sim_true_param_model_result_df = data.frame(data.table::fread("EDPM_simu_results/Results_Nimble_EDPM_Models_result.txt", sep = "\t"))
+
+head(sim_true_param_model_result_df)
+nrow(sim_true_param_model_result_df)
+
+
+plot(sim_true_param_model_result_df$PIDE_AC_post_mean)
+
+```
+
+
+##  Plot number of outer clusters at each dataset
+
+```{r}
+# make a histogram plot for number of outer cluster used across replicated datasets
+# draw vertical lines at mean and median
+# only use white,black and gray colors
+
+num_clusters <- sim_true_param_model_result_df$num_outer_clusters_used
+
+# Calculate mean and median
+mean_clusters <- mean(num_clusters, na.rm = TRUE)
+median_clusters <- median(num_clusters, na.rm = TRUE)
+
+# Create histogram
+df_clusters <- data.frame(num_clusters = num_clusters)
+
+p_clusters <- ggplot(df_clusters, aes(x = num_clusters)) +
+  geom_histogram(aes(y = ..density..), bins = 30,
+                 color = "black", fill = "gray80", alpha = 0.7) +
+  geom_vline(aes(xintercept = mean_clusters, linetype = "Mean"),
+             color = "black", size = 1) +
+  geom_vline(aes(xintercept = median_clusters, linetype = "Median"),
+             color = "gray40", size = 1) +
+  scale_linetype_manual(name = "Statistics",
+                        values = c("Mean" = "solid", "Median" = "dashed")) +
+  labs(title = "True parametric DGM: EDPM fitted model (n =12000)",
+       x = "Posterior mean of the number of outer clusters with allocation weight greater than 0.1", y = "Density") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+
+p_clusters
+
+cat("Mean number of outer clusters:", round(mean_clusters, 2), "\n")
+cat("Median number of outer clusters:", median_clusters, "\n")
+
+```
+
+
+### Plotting ALWAYS TREATED posterior means across 1000 replicated datasets
+
+```{r}
+
+posterior_means1 = sim_true_param_model_result_df$PIDE_AC_post_mean
+df1 <- data.frame(posterior_means1)
+p1 <- ggplot(df1, aes(x = posterior_means1)) +
+  geom_histogram(aes(y = ..density..), bins = 30, 
+                 color = "black", fill = "skyblue", alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Distribution of Posterior Means AT direct effects",
+       x = "Posterior Means", y = "Density") +
+  theme_minimal(base_size = 14)
+
+p1
+
+
+posterior_means2 = sim_true_param_model_result_df$PJIIE_AC_post_mean
+df2 <- data.frame(posterior_means2)
+p2 <- ggplot(df1, aes(x = posterior_means2)) +
+  geom_histogram(aes(y = ..density..), bins = 30, 
+                 color = "black", fill = "skyblue", alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Distribution of Posterior Means AT indirect effects",
+       x = "Posterior Means", y = "Density") +
+  theme_minimal(base_size = 14)
+
+p2
+
+
+posterior_means3 = sim_true_param_model_result_df$PCE_AC_post_mean
+df3 <- data.frame(posterior_means3)
+p3 <- ggplot(df1, aes(x = posterior_means3)) +
+  geom_histogram(aes(y = ..density..), bins = 30, 
+                 color = "black", fill = "skyblue", alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Distribution of Posterior Means AT total effects",
+       x = "Posterior Means", y = "Density") +
+  theme_minimal(base_size = 14)
+
+p3
+
+
+```
+
+
+### Plotting VALUE ATTENTIVE posterior means across 1000 replicated datasets
+
+```{r}
+
+posterior_means1 = sim_true_param_model_result_df$PIDE_VA_post_mean
+df1 <- data.frame(posterior_means1)
+p1 <- ggplot(df1, aes(x = posterior_means1)) +
+  geom_histogram(aes(y = ..density..), bins = 30, 
+                 color = "black", fill = "skyblue", alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Distribution of Posterior Means VALUE ATTENTIVE direct effects",
+       x = "Posterior Means", y = "Density") +
+  theme_minimal(base_size = 14)
+
+p1
+
+
+posterior_means2 = sim_true_param_model_result_df$PJIIE_VA_post_mean
+df2 <- data.frame(posterior_means2)
+p2 <- ggplot(df1, aes(x = posterior_means2)) +
+  geom_histogram(aes(y = ..density..), bins = 30, 
+                 color = "black", fill = "skyblue", alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Distribution of Posterior Means VALUE ATTENTIVE indirect effects",
+       x = "Posterior Means", y = "Density") +
+  theme_minimal(base_size = 14)
+
+p2
+
+
+posterior_means3 = sim_true_param_model_result_df$PCE_VA_post_mean
+df3 <- data.frame(posterior_means3)
+p3 <- ggplot(df1, aes(x = posterior_means3)) +
+  geom_histogram(aes(y = ..density..), bins = 30, 
+                 color = "black", fill = "skyblue", alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Distribution of Posterior Means VALUE ATTENTIVE total effects",
+       x = "Posterior Means", y = "Density") +
+  theme_minimal(base_size = 14)
+
+p3
+
+
+```
+
+
+### Plotting PRICE ATTENTIVE posterior means across 1000 replicated datasets
+
+```{r}
+
+posterior_means1 = sim_true_param_model_result_df$PIDE_PA_post_mean
+df1 <- data.frame(posterior_means1)
+p1 <- ggplot(df1, aes(x = posterior_means1)) +
+  geom_histogram(aes(y = ..density..), bins = 30, 
+                 color = "black", fill = "skyblue", alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Distribution of Posterior Means PRICE ATTENTIVE direct effects",
+       x = "Posterior Means", y = "Density") +
+  theme_minimal(base_size = 14)
+
+p1
+
+
+posterior_means2 = sim_true_param_model_result_df$PJIIE_PA_post_mean
+df2 <- data.frame(posterior_means2)
+p2 <- ggplot(df1, aes(x = posterior_means2)) +
+  geom_histogram(aes(y = ..density..), bins = 30, 
+                 color = "black", fill = "skyblue", alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Distribution of Posterior Means PRICE ATTENTIVE indirect effects",
+       x = "Posterior Means", y = "Density") +
+  theme_minimal(base_size = 14)
+
+p2
+
+
+posterior_means3 = sim_true_param_model_result_df$PCE_PA_post_mean
+df3 <- data.frame(posterior_means3)
+p3 <- ggplot(df1, aes(x = posterior_means3)) +
+  geom_histogram(aes(y = ..density..), bins = 30, 
+                 color = "black", fill = "skyblue", alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Distribution of Posterior Means PRICE ATTENTIVE total effects",
+       x = "Posterior Means", y = "Density") +
+  theme_minimal(base_size = 14)
+
+p3
+
+
+```
+
+
+### Plotting NON-ACTIVE CUSTOMERS posterior means across 1000 replicated datasets
+
+```{r}
+
+posterior_means1 = sim_true_param_model_result_df$PIDE_NAC_post_mean
+df1 <- data.frame(posterior_means1)
+p1 <- ggplot(df1, aes(x = posterior_means1)) +
+  geom_histogram(aes(y = ..density..), bins = 30, 
+                 color = "black", fill = "skyblue", alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Distribution of Posterior Means NT direct effects",
+       x = "Posterior Means", y = "Density") +
+  theme_minimal(base_size = 14)
+
+p1
+
+
+posterior_means2 = sim_true_param_model_result_df$PJIIE_NAC_post_mean
+df2 <- data.frame(posterior_means2)
+p2 <- ggplot(df1, aes(x = posterior_means2)) +
+  geom_histogram(aes(y = ..density..), bins = 30, 
+                 color = "black", fill = "skyblue", alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Distribution of Posterior Means NT indirect effects",
+       x = "Posterior Means", y = "Density") +
+  theme_minimal(base_size = 14)
+
+p2
+
+
+posterior_means3 = sim_true_param_model_result_df$PCE_NAC_post_mean
+df3 <- data.frame(posterior_means3)
+p3 <- ggplot(df1, aes(x = posterior_means3)) +
+  geom_histogram(aes(y = ..density..), bins = 30, 
+                 color = "black", fill = "skyblue", alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "Distribution of Posterior Means NT total effects",
+       x = "Posterior Means", y = "Density") +
+  theme_minimal(base_size = 14)
+
+p3
+
+
+```
+
+
+## Compute bias, coverage and MSE
+
+```{r}
+calculate_statistics = function(results_df, true_value) {
+  # Calculate Bias
+  bias = as.numeric(results_df$posterior_mean) - true_value
+  
+  # Calculate Coverage (1 if true_value is within the CI, 0 otherwise)
+  coverage = ifelse(as.numeric(results_df$lower_CI) <= true_value & as.numeric(results_df$upper_CI) >= true_value, 1, 0)
+  
+  # Calculate CI width (upper_CI - lower_CI)
+  ci_width = as.numeric(results_df$upper_CI) - as.numeric(results_df$lower_CI)
+  
+  # Calculate MSE (Mean Squared Error)
+  mse = (as.numeric(results_df$posterior_mean) - true_value)^2
+  
+  # Summarize Bias, Coverage, and MSE
+  result = data.frame(
+    bias = sprintf("%.5e", mean(bias)),
+    coverage = mean(coverage),
+    average_ci_width = mean(ci_width),
+    mse = sprintf("%.5e", mean(mse))
+  )
+  
+  return(result)
+}
+
+
+results_table_strata = function(PIDE_df_strata, PJIIE_df_strata, PCE_df_strata,
+                                true_value_df, 
+                                strata = c("active_customers", "value_attentive", "price_attentive", "non_active_customers")){
+  result_df = calculate_statistics(PIDE_df_strata, true_value_df[strata,1])
+  result_df = rbind( result_df, calculate_statistics(PJIIE_df_strata, true_value_df[strata,2]))
+  result_df = rbind( result_df, calculate_statistics(PCE_df_strata, true_value_df[strata,3]))
+  colnames(result_df) = c("BIAS",  "95% CI coverage rate", "Average CI width" ,"MSE")
+  rownames(result_df) = c("IDE", "IIE", "TE")
+  print(result_df)
+}
+
+active_customer_PIDE_result_df = data.frame(posterior_mean = sim_true_param_model_result_df$PIDE_AC_post_mean,
+                                   lower_CI =  sim_true_param_model_result_df$PIDE_AC_lowerCI,
+                                   upper_CI = sim_true_param_model_result_df$PIDE_AC_upperCI)
+
+
+active_customer_PJIIE_result_df = data.frame(posterior_mean = sim_true_param_model_result_df$PJIIE_AC_post_mean,
+                                   lower_CI =  sim_true_param_model_result_df$PJIIE_AC_lowerCI,
+                                   upper_CI = sim_true_param_model_result_df$PJIIE_AC_upperCI)
+
+
+active_customer_PCE_result_df = data.frame(posterior_mean = sim_true_param_model_result_df$PCE_AC_post_mean,
+                                   lower_CI =  sim_true_param_model_result_df$PCE_AC_lowerCI,
+                                   upper_CI = sim_true_param_model_result_df$PCE_AC_upperCI)
+
+
+value_attentive_PIDE_result_df = data.frame(posterior_mean = sim_true_param_model_result_df$PIDE_VA_post_mean,
+                                   lower_CI =  sim_true_param_model_result_df$PIDE_VA_lowerCI,
+                                   upper_CI = sim_true_param_model_result_df$PIDE_VA_upperCI)
+
+
+value_attentive_PJIIE_result_df = data.frame(posterior_mean = sim_true_param_model_result_df$PJIIE_VA_post_mean,
+                                   lower_CI =  sim_true_param_model_result_df$PJIIE_VA_lowerCI,
+                                   upper_CI = sim_true_param_model_result_df$PJIIE_VA_upperCI)
+
+
+value_attentive_PCE_result_df = data.frame(posterior_mean = sim_true_param_model_result_df$PCE_VA_post_mean,
+                                   lower_CI =  sim_true_param_model_result_df$PCE_VA_lowerCI,
+                                   upper_CI = sim_true_param_model_result_df$PCE_VA_upperCI)
+
+
+price_attentive_PIDE_result_df = data.frame(posterior_mean = sim_true_param_model_result_df$PIDE_PA_post_mean,
+                                   lower_CI =  sim_true_param_model_result_df$PIDE_PA_lowerCI,
+                                   upper_CI = sim_true_param_model_result_df$PIDE_PA_upperCI)
+
+
+price_attentive_PJIIE_result_df = data.frame(posterior_mean = sim_true_param_model_result_df$PJIIE_PA_post_mean,
+                                   lower_CI =  sim_true_param_model_result_df$PJIIE_PA_lowerCI,
+                                   upper_CI = sim_true_param_model_result_df$PJIIE_PA_upperCI)
+
+
+price_attentive_PCE_result_df = data.frame(posterior_mean = sim_true_param_model_result_df$PCE_PA_post_mean,
+                                   lower_CI =  sim_true_param_model_result_df$PCE_PA_lowerCI,
+                                   upper_CI = sim_true_param_model_result_df$PCE_PA_upperCI)
+
+
+non_active_customer_PIDE_result_df = data.frame(posterior_mean = sim_true_param_model_result_df$PIDE_NAC_post_mean,
+                                   lower_CI =  sim_true_param_model_result_df$PIDE_NAC_lowerCI,
+                                   upper_CI = sim_true_param_model_result_df$PIDE_NAC_upperCI)
+
+
+non_active_customer_PJIIE_result_df = data.frame(posterior_mean = sim_true_param_model_result_df$PJIIE_NAC_post_mean,
+                                   lower_CI =  sim_true_param_model_result_df$PJIIE_NAC_lowerCI,
+                                   upper_CI = sim_true_param_model_result_df$PJIIE_NAC_upperCI)
+
+
+non_active_customer_PCE_result_df = data.frame(posterior_mean = sim_true_param_model_result_df$PCE_NAC_post_mean,
+                                   lower_CI =  sim_true_param_model_result_df$PCE_NAC_lowerCI,
+                                   upper_CI = sim_true_param_model_result_df$PCE_NAC_upperCI)
+
+
+```
+
+
+## Print Results 
+
+
+### Active customer stratum
+
+```{r}
+
+results_table_strata(active_customer_PIDE_result_df , active_customer_PJIIE_result_df ,
+                    active_customer_PCE_result_df ,
+                    true_causal_estimands, "active_customer")
+
+
+```
+
+
+### Value attentive stratum
+
+```{r}
+
+results_table_strata(value_attentive_PIDE_result_df , value_attentive_PJIIE_result_df ,
+                    value_attentive_PCE_result_df ,
+                    true_causal_estimands, "value_attentive")
+
+
+```
+
+
+### Price attentive stratum
+
+```{r}
+
+results_table_strata(price_attentive_PIDE_result_df , price_attentive_PJIIE_result_df ,
+                    price_attentive_PCE_result_df ,
+                    true_causal_estimands, "price_attentive")
+
+
+```
+
+
+### Non-active customer stratum
+
+```{r}
+
+results_table_strata(non_active_customer_PIDE_result_df , non_active_customer_PJIIE_result_df ,
+                    non_active_customer_PCE_result_df ,
+                    true_causal_estimands, "non_active_customer")
+
+
+```
+
